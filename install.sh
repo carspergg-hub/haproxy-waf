@@ -143,6 +143,11 @@ global
 
 defaults
     mode http
+    option                  dontlognull
+    option http-server-close
+    option forwardfor       except 127.0.0.0/8
+    option                  redispatch
+    retries                 3
     timeout connect 5s
     timeout client 50s
     timeout server 50s
