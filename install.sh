@@ -23,13 +23,15 @@ export PATH=$PATH:/usr/local/go/bin
 # ----------------------------
 echo -e "${GREEN}[2/6] 安装 HAProxy 2.8.24 (旁路隔离模式)...${NC}"
 cd /usr/local/src
-wget -q https://www.haproxy.org/download/2.8/src/haproxy-2.8.24.tar.gz
-tar -zxf haproxy-2.8.24.tar.gz
+if [ ! -d "haproxy-2.8.24" ]; then
+    wget -q https://www.haproxy.org/download/2.8/src/haproxy-2.8.24.tar.gz
+    tar -zxf haproxy-2.8.24.tar.gz
+fi
 cd haproxy-2.8.24
 
 make TARGET=linux-glibc USE_OPENSSL=1 USE_PCRE=1 USE_SYSTEMD=1
 
-# 隔离部署：不执行 make install，避免覆盖原机 /usr/sbin/haproxy
+# 隔离部署：不执行 make install，避免覆盖原机老版本
 cp haproxy /usr/local/sbin/haproxy-waf
 chmod +x /usr/local/sbin/haproxy-waf
 
@@ -45,48 +47,64 @@ rm -rf coraza-spoa
 git clone https://github.com/corazawaf/coraza-spoa.git
 cd coraza-spoa
 
-# 检出 0.7.2 现代稳定版 (支持 anomaly_score 与原生 unique_id 解析)
+# 检出 0.7.2 现代稳定版
 git checkout v0.7.2 || true
 go mod download
+# 0.7.2 版本 main.go 在根目录，使用 . 编译
 go build -o coraza-spoa .
 cp coraza-spoa /usr/local/bin/
 
 # ----------------------------
-# CRS (OWASP 核心规则集)
+# 核心规则集 CRS v4.3.0 & Config
 # ----------------------------
-echo -e "${GREEN}[4/6] 配置 CRS...${NC}"
-mkdir -p /etc/coraza/rules
+echo -e "${GREEN}[4/6] 配置 CRS v4.3.0 与 Coraza...${NC}"
+mkdir -p /etc/coraza/rules/coreruleset
+touch /var/log/coraza.log
+chmod 666 /var/log/coraza.log
 
-wget https://raw.githubusercontent.com/corazawaf/coraza/main/coraza.conf-recommended -O /etc/coraza/rules/coraza.conf
+# 1. 下载官方底层推荐配置
+wget -q https://raw.githubusercontent.com/corazawaf/coraza/main/coraza.conf-recommended -O /etc/coraza/rules/coraza.conf
 sed -i 's/SecRuleEngine DetectionOnly/SecRuleEngine On/g' /etc/coraza/rules/coraza.conf
 
-cd /etc/coraza/rules
-rm -rf coreruleset
-git clone -b v4.27.0 https://github.com/coreruleset/coreruleset.git
+# 2. 克隆并提取 CRS v4.3.0
+rm -rf /tmp/coreruleset
+git clone -b v4.3.0 https://github.com/coreruleset/coreruleset.git /tmp/coreruleset
+cp -r /tmp/coreruleset/rules /etc/coraza/rules/coreruleset/
+cp /tmp/coreruleset/crs-setup.conf.example /etc/coraza/rules/coreruleset/crs-setup.conf
+rm -rf /tmp/coreruleset
 
-cd coreruleset
-cp crs-setup.conf.example crs-setup.conf
-
+# 3. 注入降级基线 (PL1)
 cat > /etc/coraza/rules/crs-tuning.conf <<EOF
-# 基础防御基线：设置 PL1
 SecAction "id:900000,phase:1,pass,nolog,setvar:tx.paranoia_level=1"
 EOF
 
+# 4. 写入支持 0.7.2 新语法的 YAML
 cat > /etc/coraza/config.yaml <<EOF
 bind: "127.0.0.1:9000"
+default_application: "default"
+
+# --- 全局日志配置 ---
 log_level: error
 log_file: "/var/log/coraza.log"
-directives: |
-  Include /etc/coraza/rules/coraza.conf
-  Include /etc/coraza/rules/crs-tuning.conf
-  Include /etc/coraza/rules/coreruleset/crs-setup.conf
-  Include /etc/coraza/rules/coreruleset/rules/*.conf
+log_format: "json"
+
+applications:
+  - name: "default"
+    # --- 应用日志配置（双重配置，防止报错） ---
+    log_level: error
+    log_file: "/var/log/coraza.log"
+    log_format: "json"
+    directives: |
+      Include /etc/coraza/rules/coraza.conf
+      Include /etc/coraza/rules/crs-tuning.conf
+      Include /etc/coraza/rules/coreruleset/crs-setup.conf
+      Include /etc/coraza/rules/coreruleset/rules/*.conf
 EOF
 
 # ----------------------------
 # SPOE (纯净标准 Schema)
 # ----------------------------
-echo -e "${GREEN}[5/6] 配置 SPOE...${NC}"
+echo -e "${GREEN}[5/6] 配置 HAProxy SPOE...${NC}"
 
 cat > /etc/haproxy-waf/coraza.spoe <<EOF
 [coraza]
@@ -99,7 +117,6 @@ spoe-agent coraza-agent
     use-backend coraza-spoa
 
 spoe-message check-request
-    # 纯粹位置参数，不使用别名/事件绑定
     args unique-id method path query req.ver req.hdrs_bin req.body_size req.body
 EOF
 
@@ -122,7 +139,6 @@ defaults
     timeout server 50s
 
 frontend http_in
-    # 监听 8081，与原机器上的 80 端口完全隔离
     bind *:8081
 
     # -------------------------
@@ -151,7 +167,7 @@ frontend http_in
     http-request set-var(txn.block) int(0) if !{ var(txn.skip_waf) -m int eq 1 }
 
     # -------------------------
-    # 决策收敛 (对齐 Coraza 0.7.2 的 anomaly_score 变量)
+    # 决策收敛 (精准对齐 anomaly_score)
     # -------------------------
     http-request set-var(txn.block) int(1) if { var(txn.coraza.intervention) -m int gt 0 } or { var(txn.coraza.anomaly_score) -m int gt 5 }
 
@@ -163,7 +179,6 @@ frontend http_in
     default_backend web_servers
 
 backend web_servers
-    # 测试可以先转到本机 8080 或原来的 80 端口
     server app1 127.0.0.1:8080 check
 
 backend coraza-spoa
@@ -174,7 +189,7 @@ EOF
 # ----------------------------
 # Systemd 服务 (独立防爆 & 无损热重载)
 # ----------------------------
-echo -e "${GREEN}[6/6] 启动服务...${NC}"
+echo -e "${GREEN}[6/6] 注册独立服务并启动...${NC}"
 
 cat > /etc/systemd/system/coraza.service <<EOF
 [Unit]
@@ -196,10 +211,8 @@ Description=HAProxy 2.8.24 WAF Gateway
 After=network.target
 
 [Service]
-# 防爆语法预检
 ExecStartPre=/usr/local/sbin/haproxy-waf -f /etc/haproxy-waf/haproxy.cfg -c -q
 ExecStart=/usr/local/sbin/haproxy-waf -Ws -f /etc/haproxy-waf/haproxy.cfg -p /var/run/haproxy-waf.pid
-# 平滑重载 (Hitless Reload)
 ExecReload=/bin/kill -USR2 \$MAINPID
 Restart=always
 
@@ -212,7 +225,7 @@ systemctl enable --now coraza
 systemctl enable --now haproxy-waf
 
 echo -e "${GREEN}====================================================${NC}"
-echo -e " 部署完成！旁路安全网关已就绪。"
+echo -e " 部署完成！"
 echo -e " HAProxy-WAF 监听端口: 8081"
-echo -e " 配置文件目录: /etc/haproxy-waf/"
+echo -e " Coraza WAF 日志文件: /var/log/coraza.log (JSON 格式)"
 echo -e "${GREEN}====================================================${NC}"
