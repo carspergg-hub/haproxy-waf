@@ -157,7 +157,7 @@ frontend http_in
     # Set coraza app in HAProxy config to allow customized configs per host.
     # You can also just leave this as is or even replace the use of a variable
     # inside the coraza.cfg.
-    http-request set-var(txn.coraza.app) str(sample_app)
+    http-request set-var(txn.coraza.app) str(default)
 
     # !! Every http-request line will be executed before this !!
     # Execute coraza request check.
