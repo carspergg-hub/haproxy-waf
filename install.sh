@@ -62,7 +62,7 @@ sed -i 's/SecRuleEngine DetectionOnly/SecRuleEngine On/g' /etc/coraza/rules/cora
 
 cd /etc/coraza/rules
 rm -rf coreruleset
-git clone -b v4.0.0 https://github.com/coreruleset/coreruleset.git
+git clone -b v4.27.0 https://github.com/coreruleset/coreruleset.git
 
 cd coreruleset
 cp crs-setup.conf.example crs-setup.conf
