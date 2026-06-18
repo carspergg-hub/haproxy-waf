@@ -86,13 +86,15 @@ default_application: "default"
 # --- 全局日志配置 ---
 log_level: error
 log_file: "/var/log/coraza.log"
+#log_file: "/dev/stdout"
 log_format: "json"
 
 applications:
   - name: "default"
     # --- 应用日志配置（双重配置，防止报错） ---
     log_level: error
-    log_file: "/var/log/coraza.log"
+    #log_file: "/var/log/coraza.log"
+    log_file: "/dev/stdout"
     log_format: "json"
     directives: |
       Include /etc/coraza/rules/coraza.conf
