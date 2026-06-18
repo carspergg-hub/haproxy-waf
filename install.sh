@@ -48,7 +48,7 @@ cd coraza-spoa
 # 检出 0.7.2 现代稳定版 (支持 anomaly_score 与原生 unique_id 解析)
 git checkout v0.7.2 || true
 go mod download
-go build -o coraza-spoa cmd/main.go
+go build -o coraza-spoa .
 cp coraza-spoa /usr/local/bin/
 
 # ----------------------------
