@@ -4,6 +4,13 @@ set -e
 GREEN='\033[0;32m'
 NC='\033[0m'
 
+# ============================================================
+# HAProxy + Coraza WAF (Isolated Safe Version)
+# - DOES NOT overwrite system haproxy
+# - installs parallel binary: haproxy-waf
+# - safe rollback friendly
+# ============================================================
+
 echo -e "${GREEN}[1/6] 环境准备...${NC}"
 yum update -y
 yum install -y epel-release gcc wget git make pcre-devel openssl-devel systemd-devel
@@ -18,30 +25,35 @@ if [ ! -d "/usr/local/go" ]; then
 fi
 export PATH=$PATH:/usr/local/go/bin
 
-# ----------------------------
-# HAProxy
-# ----------------------------
-echo -e "${GREEN}[2/6] 安装 HAProxy...${NC}"
+# ============================================================
+# HAProxy ISOLATED BUILD (SAFE)
+# ============================================================
+echo -e "${GREEN}[2/6] 编译 HAProxy (隔离模式，不影响系统版本)...${NC}"
 cd /usr/local/src
-wget -q https://www.haproxy.org/download/2.8/src/haproxy-2.8.3.tar.gz
-rm -rf haproxy-2.8.3
-tar -zxf haproxy-2.8.3.tar.gz
-cd haproxy-2.8.3
+wget -q https://www.haproxy.org/download/2.8/src/haproxy-2.8.24.tar.gz
+rm -rf haproxy-2.8.24
+
+# 防止重复下载失败
+tar -zxf haproxy-2.8.24.tar.gz
+cd haproxy-2.8.24
 
 make TARGET=linux-glibc USE_OPENSSL=1 USE_PCRE=1 USE_SYSTEMD=1
-make install
 
-ln -sf /usr/local/sbin/haproxy /usr/sbin/haproxy
+# ❗关键：不执行 make install，不覆盖系统 haproxy
+cp haproxy /usr/local/sbin/haproxy-waf
+chmod +x /usr/local/sbin/haproxy-waf
 
+# create isolated runtime dirs
 useradd -r -s /bin/false haproxy || true
-mkdir -p /etc/haproxy /var/lib/haproxy
+mkdir -p /etc/haproxy-waf /var/lib/haproxy-waf
 
-# ----------------------------
+# ============================================================
 # Coraza SPOA
-# ----------------------------
+# ============================================================
 echo -e "${GREEN}[3/6] 安装 Coraza SPOA...${NC}"
 cd /usr/local/src
 rm -rf coraza-spoa
+
 git clone https://github.com/corazawaf/coraza-spoa.git
 cd coraza-spoa
 
@@ -50,9 +62,9 @@ go mod download
 go build -o coraza-spoa cmd/main.go
 cp coraza-spoa /usr/local/bin/
 
-# ----------------------------
-# CRS
-# ----------------------------
+# ============================================================
+# CRS CONFIG
+# ============================================================
 echo -e "${GREEN}[4/6] 配置 CRS...${NC}"
 mkdir -p /etc/coraza/rules
 
@@ -80,12 +92,12 @@ directives: |
   Include /etc/coraza/rules/coreruleset/rules/*.conf
 EOF
 
-# ----------------------------
-# SPOE
-# ----------------------------
+# ============================================================
+# SPOE CONFIG
+# ============================================================
 echo -e "${GREEN}[5/6] 配置 SPOE...${NC}"
 
-cat > /etc/haproxy/coraza.spoe <<EOF
+cat > /etc/haproxy-waf/coraza.spoe <<EOF
 [coraza]
 spoe-agent coraza-agent
     messages check-request
@@ -97,19 +109,21 @@ spoe-agent coraza-agent
 
 spoe-message check-request
     args unique-id method path query req.ver req.hdrs_bin req.body_size req.body
-    event on-frontend-http-request
 EOF
 
-# ----------------------------
-# HAProxy
-# ----------------------------
-cat > /etc/haproxy/haproxy.cfg <<EOF
+# ============================================================
+# ISOLATED HAPROXY CONFIG
+# ============================================================
+echo -e "${GREEN}[6/6] 配置 HAProxy (隔离端口 8081)...${NC}"
+
+cat > /etc/haproxy-waf/haproxy.cfg <<EOF
 global
     log 127.0.0.1 local0
     maxconn 20000
     user haproxy
     group haproxy
     daemon
+    chroot /var/lib/haproxy-waf
 
 defaults
     mode http
@@ -118,7 +132,7 @@ defaults
     timeout server 50s
 
 frontend http_in
-    bind *:80
+    bind *:8081
 
     unique-id-format %{+X}o\ %ci:%cp_%fi:%fp_%Ts_%rt:%pid
     unique-id-header X-Unique-ID
@@ -130,10 +144,9 @@ frontend http_in
 
     http-request set-var(txn.skip_waf) int(1) if bypass_waf
 
-    filter spoe engine coraza config /etc/haproxy/coraza.spoe
+    filter spoe engine coraza config /etc/haproxy-waf/coraza.spoe
 
     http-request set-var(txn.block) int(0)
-
     http-request set-var(txn.block) int(1) if { var(txn.coraza.intervention) -m int gt 0 } or { var(txn.coraza.score) -m int gt 5 }
 
     http-request deny deny_status 403 if !{ var(txn.skip_waf) -m int eq 1 } { var(txn.block) -m int eq 1 }
@@ -148,10 +161,26 @@ backend coraza-spoa
     server spoa1 127.0.0.1:9000 check
 EOF
 
-# ----------------------------
-# systemd
-# ----------------------------
-echo -e "${GREEN}[6/6] 启动服务...${NC}"
+# ============================================================
+# SYSTEMD
+# ============================================================
+
+echo "creating systemd services..."
+
+cat > /etc/systemd/system/haproxy-waf.service <<EOF
+[Unit]
+Description=HAProxy WAF Isolated Instance
+After=network.target
+
+[Service]
+ExecStartPre=/usr/local/sbin/haproxy-waf -f /etc/haproxy-waf/haproxy.cfg -c -q
+ExecStart=/usr/local/sbin/haproxy-waf -Ws -f /etc/haproxy-waf/haproxy.cfg -p /var/run/haproxy-waf.pid
+ExecReload=/bin/kill -USR2 \$MAINPID
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
 
 cat > /etc/systemd/system/coraza.service <<EOF
 [Unit]
@@ -167,23 +196,8 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
-cat > /etc/systemd/system/haproxy.service <<EOF
-[Unit]
-Description=HAProxy
-After=network.target
-
-[Service]
-ExecStartPre=/usr/sbin/haproxy -f /etc/haproxy/haproxy.cfg -c -q
-ExecStart=/usr/sbin/haproxy -Ws -f /etc/haproxy/haproxy.cfg -p /var/run/haproxy.pid
-ExecReload=/bin/kill -USR2 \$MAINPID
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
 systemctl daemon-reload
 systemctl enable --now coraza
-systemctl enable --now haproxy
+systemctl enable --now haproxy-waf
 
-echo -e "DEPLOY COMPLETE - PRODUCTION STABLE WAF"
+echo -e "DEPLOY COMPLETE - SAFE ISOLATED WAF (ROLLBACK READY)"
