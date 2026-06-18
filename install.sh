@@ -111,7 +111,6 @@ cat > /etc/haproxy-waf/coraza.spoe <<EOF
 spoe-agent coraza-agent
     #messages   coraza-res
     groups      coraza-req    
-    messages coraza-req
     option var-prefix coraza
     option      set-on-error    error
     timeout hello 2s
