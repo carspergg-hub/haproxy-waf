@@ -57,7 +57,7 @@ cp coraza-spoa /usr/local/bin/
 echo -e "${GREEN}[4/6] 配置 CRS...${NC}"
 mkdir -p /etc/coraza/rules
 
-cp coraza.conf-recommended /etc/coraza/rules/coraza.conf
+wget https://raw.githubusercontent.com/corazawaf/coraza/main/coraza.conf-recommended -O /etc/coraza/rules/coraza.conf
 sed -i 's/SecRuleEngine DetectionOnly/SecRuleEngine On/g' /etc/coraza/rules/coraza.conf
 
 cd /etc/coraza/rules
