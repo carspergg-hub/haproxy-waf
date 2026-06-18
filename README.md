@@ -1,155 +1,179 @@
-# HAProxy + Coraza WAF 部署项目（隔离安全版）
+# HAProxy + Coraza WAF（旁路隔离版）
 
-本项目提供一个**生产级一键部署脚本**，用于构建轻量级 Web 应用防火墙（WAF）网关，采用“非侵入式隔离部署”，避免影响原有 HAProxy 生产环境。
+基于 HAProxy 2.8.24 + Coraza SPOA v0.7.2 + OWASP CRS v4.0.0 构建的轻量级 WAF 网关。
+
+特点：
+
+- 不覆盖系统原有 HAProxy
+- 独立二进制 `haproxy-waf`
+- 独立配置目录 `/etc/haproxy-waf`
+- 独立监听端口 `8081`
+- 支持快速回退
+- 适合生产环境灰度验证
 
 ---
 
-## 🚀 架构说明
+## 架构
 
-本版本采用**双栈隔离架构**：
-
-```
-                ┌────────────────────┐
-                │ 生产 HAProxy（不变） │
-                └─────────┬──────────┘
-                          │
-                          │（可选流量切换）
-                          v
-                ┌────────────────────┐
-                │ haproxy-waf 网关    │  ← 独立进程 / 独立端口
-                │ /usr/local/sbin/... │
-                └─────────┬──────────┘
-                          │
-                          v
-                ┌────────────────────┐
-                │ Coraza SPOA WAF     │
-                └────────────────────┘
-                          │
-                          v
-                ┌────────────────────┐
-                │ 后端服务 8080       │
-                └────────────────────┘
+```text
+Client
+   |
+   v
+haproxy-waf:8081
+   |
+   +---- SPOE ----> Coraza SPOA v0.7.2
+   |                     |
+   |<---- Decision ------+
+   |
+   v
+Backend Service
 ```
 
 ---
 
-## 🔐 核心能力
+## 软件版本
 
-### 1. 非破坏式部署（关键升级）
-- ❌ 不再覆盖系统 `/usr/sbin/haproxy`
-- ✅ 独立二进制：`haproxy-waf`
-- ✅ 可随时回滚到原 HAProxy
-
-### 2. 高性能网关能力
-- 基于 HAProxy 2.8.24 编译
-- 支持 20K+ 并发连接
-- 独立运行 chroot 环境
-
-### 3. WAF 防护能力
-- Coraza WAF + OWASP CRS v4
-- Paranoia Level 1（降低误杀）
-- SPOE 异步检测机制
-
-### 4. 流量治理能力
-- `/health` `/metrics` 自动旁路
-- 上传接口优化处理
-- 512KB 大包拦截策略
-
-### 5. 决策模型
-- `intervention > 0` → 拦截
-- `score > 5` → 拦截
-- 否则放行
+| 组件 | 版本 |
+|--------|--------|
+| HAProxy | 2.8.24 |
+| Coraza SPOA | 0.7.2 |
+| OWASP CRS | 4.0.0 |
+| Go | 1.22.2 |
 
 ---
 
-## ⚙️ 安装方式
+## 核心能力
 
-### 1. 克隆仓库
+### 安全部署
+
+- 非侵入式安装
+- 原有 HAProxy 完全保留
+- 回退仅需停止 haproxy-waf 服务
+
+### WAF能力
+
+- Coraza WAF 引擎
+- OWASP CRS v4
+- Paranoia Level 1
+- anomaly score 检测
+- intervention 拦截
+
+### 流量治理
+
+自动旁路：
+
+- /health
+- /metrics
+- /upload
+- /api/files
+- /api/bulk
+- /api/import
+
+### DoS基础防护
+
+默认限制：
+
+```text
+非白名单接口
+Body > 512KB
+直接返回 413
+```
+
+---
+
+## 安装
+
 ```bash
 git clone https://github.com/carspergg-hub/haproxy-waf.git
 cd haproxy-waf
-```
-
-### 2. 执行安装脚本
-```bash
 chmod +x install.sh
-sudo ./install.sh
+./install.sh
 ```
 
 ---
 
-## 📦 安装内容
+## 安装结果
 
-脚本将自动部署以下组件：
+### 二进制
 
-- HAProxy 2.8.24（隔离编译版本）
-- haproxy-waf（独立二进制）
-- Coraza SPOA 引擎
-- OWASP CRS 规则库
-- systemd 服务：
-  - haproxy-waf.service
-  - coraza.service
-
----
-
-## 🔧 配置说明
-
-### WAF 网关端口
-```
-8081（与生产环境隔离）
+```text
+/usr/local/sbin/haproxy-waf
+/usr/local/bin/coraza-spoa
 ```
 
-### 后端服务
-```
-127.0.0.1:8080
+### 配置目录
+
+```text
+/etc/haproxy-waf/
+/etc/coraza/
 ```
 
-### SPOA WAF
-```
-127.0.0.1:9000
+### 服务
+
+```bash
+systemctl status haproxy-waf
+systemctl status coraza
 ```
 
 ---
 
-## 🧠 设计说明
+## 端口规划
 
-本架构强调：
-
-- 非侵入式安全增强
-- 与生产系统完全解耦
-- 可回滚、安全可控
-- SPOE 异步检测降低延迟
+| 端口 | 用途 |
+|--------|--------|
+| 8081 | WAF网关 |
+| 9000 | Coraza SPOA |
+| 8080 | 后端应用 |
 
 ---
 
-## 📊 请求流转流程
+## 请求处理流程
 
+```text
+Request
+   |
+   +--> Body > 512KB ?
+           |
+           +--> 413
+
+   +--> bypass ?
+           |
+           +--> Backend
+
+   +--> Coraza
+           |
+           +--> intervention > 0
+           |
+           +--> anomaly_score > 5
+           |
+           +--> 403
+
+   +--> Backend
 ```
-请求 → haproxy-waf（8081） → SPOE → Coraza WAF → 决策
-        → 放行 → 后端服务
-        → 拦截 → 403/413
+
+---
+
+## 回退方案
+
+停止旁路网关即可：
+
+```bash
+systemctl stop haproxy-waf
 ```
 
----
-
-## ⚠️ 注意事项
-
-- 默认不影响生产 HAProxy
-- WAF 网关独立运行（8081）
-- 可作为旁路安全层或灰度入口
+系统原有 HAProxy 不受任何影响。
 
 ---
 
-## 📈 后续增强方向
+## 后续规划
 
-- 多实例 SPOA 高可用
-- Redis 动态规则中心
-- Prometheus + Grafana 监控
-- 流量灰度与AB测试
-- AI 攻击评分模型
+- 多 SPOA 实例高可用
+- Redis 动态黑名单
+- Prometheus Metrics
+- Grafana Dashboard
+- GeoIP/IP信誉库
+- AI异常流量识别
 
 ---
 
-## 📄 License
-
-MIT License
+License: MIT
