@@ -120,7 +120,7 @@ spoe-agent coraza-agent
     log         global
 
 spoe-message coraza-req
-    args app=var(txn.coraza.app) src-ip=src src-port=src_port dst-ip=dst dst-port=dst_port method=method path=path query=query version=req.ver headers=req.hdrs body=req.body exportRuleIDs=bool(false)
+    args app=var(txn.coraza.app) id=unique-id src-ip=src src-port=src_port dst-ip=dst dst-port=dst_port method=method path=path query=query version=req.ver headers=req.hdrs body=req.body exportRuleIDs=bool(false)
     event on-frontend-http-request
 spoe-message coraza-res
     args app=var(txn.coraza.app) id=var(txn.coraza.id) version=res.ver status=status headers=res.hdrs body=res.body exportRuleIDs=bool(false) detect-only=bool(false)
@@ -149,6 +149,8 @@ defaults
 
 frontend http_in
     bind *:8081
+    unique-id-format %{+X}o\ %ci:%cp_%fi:%fp_%Ts_%rt:%pid
+    unique-id-header X-Unique-ID
     # Emulate Apache behavior by only allowing http 1.0, 1.1, 2.0 
     http-request deny deny_status 400 if !HTTP
     http-request deny deny_status 400 if !HTTP_1.0 !HTTP_1.1 !HTTP_2.0
