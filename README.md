@@ -80,7 +80,16 @@ Body > 512KB
 ```
 
 ---
+## 代理环境说明
 
+如果服务器无法直接访问 GitHub、Go Module 或外网仓库，请先配置代理环境变量。
+
+### HTTP/HTTPS 代理
+
+```bash
+export http_proxy=http://IP:PORT
+export https_proxy=http://IP:PORT
+```
 ## 安装
 
 ```bash
