@@ -118,6 +118,7 @@ spoe-agent coraza-agent
 
 spoe-message check-request
     args unique-id method path query req.ver req.hdrs_bin req.body_size req.body
+    event on-frontend-http-request
 EOF
 
 # ----------------------------
