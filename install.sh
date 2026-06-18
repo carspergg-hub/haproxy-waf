@@ -136,7 +136,7 @@ EOF
 # ----------------------------
 cat > /etc/haproxy-waf/haproxy.cfg <<EOF
 global
-    log 127.0.0.1 local0
+    log stdout format raw local2
     maxconn 20000
     user haproxy
     group haproxy
@@ -145,6 +145,7 @@ global
 
 defaults
     mode http
+    option httplog
     option                  dontlognull
     option http-server-close
     option forwardfor       except 127.0.0.0/8
