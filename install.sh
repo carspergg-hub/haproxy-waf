@@ -109,16 +109,25 @@ echo -e "${GREEN}[5/6] 配置 HAProxy SPOE...${NC}"
 cat > /etc/haproxy-waf/coraza.spoe <<EOF
 [coraza]
 spoe-agent coraza-agent
-    messages check-request
+    #messages   coraza-res
+    groups      coraza-req    
+    messages coraza-req
     option var-prefix coraza
-    timeout hello 100ms
-    timeout idle 30s
+    option      set-on-error    error
+    timeout hello 2s
+    timeout idle 2m
     timeout processing 500ms
     use-backend coraza-spoa
+    log         global
 
-spoe-message check-request
-    args unique-id method path query req.ver req.hdrs_bin req.body_size req.body
+spoe-message coraza-req
+    args app=var(txn.coraza.app) src-ip=src src-port=src_port dst-ip=dst dst-port=dst_port method=method path=path query=query version=req.ver headers=req.hdrs body=req.body exportRuleIDs=bool(false)
     event on-frontend-http-request
+spoe-message coraza-res
+    args app=var(txn.coraza.app) id=var(txn.coraza.id) version=res.ver status=status headers=res.hdrs body=res.body exportRuleIDs=bool(false) detect-only=bool(false)
+    event on-http-response
+spoe-group coraza-req
+    messages coraza-req
 EOF
 
 # ----------------------------
@@ -141,42 +150,33 @@ defaults
 
 frontend http_in
     bind *:8081
+    # Emulate Apache behavior by only allowing http 1.0, 1.1, 2.0 
+    http-request deny deny_status 400 if !HTTP
+    http-request deny deny_status 400 if !HTTP_1.0 !HTTP_1.1 !HTTP_2.0
 
-    # -------------------------
-    # Trace ID 贯通
-    # -------------------------
-    unique-id-format %{+X}o\ %ci:%cp_%fi:%fp_%Ts_%rt:%pid
-    unique-id-header X-Unique-ID
+    # Set coraza app in HAProxy config to allow customized configs per host.
+    # You can also just leave this as is or even replace the use of a variable
+    # inside the coraza.cfg.
+    http-request set-var(txn.coraza.app) str(sample_app)
 
-    # -------------------------
-    # 业务旁路池与 DoS 防御
-    # -------------------------
-    acl bypass_waf path_beg /health /metrics /upload /api/files /api/bulk /api/import
-    acl large_body req.body_size gt 524288
-    
-    http-request deny deny_status 413 if large_body !bypass_waf
-    http-request set-var(txn.skip_waf) int(1) if bypass_waf
-
-    # -------------------------
-    # WAF 引擎挂载
-    # -------------------------
+    # !! Every http-request line will be executed before this !!
+    # Execute coraza request check.
     filter spoe engine coraza config /etc/haproxy-waf/coraza.spoe
+    http-request send-spoe-group coraza coraza-req
 
-    # -------------------------
-    # 状态机初始化 (按需分配)
-    # -------------------------
-    http-request set-var(txn.block) int(0) if !{ var(txn.skip_waf) -m int eq 1 }
+    # Currently haproxy cannot use variables to set the code or deny_status, so this needs to be manually configured here
+    http-request redirect code 302 location %[var(txn.coraza.data)] if { var(txn.coraza.action) -m str redirect }
+    http-response redirect code 302 location %[var(txn.coraza.data)] if { var(txn.coraza.action) -m str redirect }
 
-    # -------------------------
-    # 决策收敛 (精准对齐 anomaly_score)
-    # -------------------------
-    http-request set-var(txn.block) int(1) if { var(txn.coraza.intervention) -m int gt 0 } or { var(txn.coraza.anomaly_score) -m int gt 5 }
+    http-request deny deny_status 403 hdr waf-block "request"  if { var(txn.coraza.action) -m str deny }
+    http-response deny deny_status 403 hdr waf-block "response" if { var(txn.coraza.action) -m str deny }
 
-    # -------------------------
-    # 最终决断
-    # -------------------------
-    http-request deny deny_status 403 if !{ var(txn.skip_waf) -m int eq 1 } { var(txn.block) -m int eq 1 }
+    http-request silent-drop if { var(txn.coraza.action) -m str drop }
+    http-response silent-drop if { var(txn.coraza.action) -m str drop }
 
+    # Deny in case of an error, when processing with the Coraza SPOA
+    http-request deny deny_status 500 if { var(txn.coraza.error) -m int gt 0 }
+    http-response deny deny_status 500 if { var(txn.coraza.error) -m int gt 0 }
     default_backend web_servers
 
 backend web_servers
